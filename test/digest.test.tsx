@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 
 const config = { adapter: 'shim', installed: '2026-10-29T14:06:00+01:00', beatEverySeconds: 60, runsDir: 'runs' };
@@ -52,5 +55,56 @@ describe('digest page', () => {
   it('404s for a night with no run log', async () => {
     const res = await createApp(config).request('/digest/1999-01-01');
     expect(res.status).toBe(404);
+  });
+});
+
+describe('digest edge cases', () => {
+  let runsDir: string;
+
+  beforeEach(() => {
+    runsDir = mkdtempSync(join(tmpdir(), 'rig-digest-'));
+  });
+
+  afterEach(() => {
+    rmSync(runsDir, { recursive: true, force: true });
+  });
+
+  it('returns an empty-but-ok digest for a night with no run lines', async () => {
+    writeFileSync(join(runsDir, '2026-11-01.jsonl'), '');
+    const edgeConfig = { ...config, runsDir };
+
+    const jsonRes = await createApp(edgeConfig).request('/api/digest/2026-11-01');
+    expect(jsonRes.status).toBe(200);
+    const body = await jsonRes.json();
+    expect(body.rows).toEqual([]);
+    expect(body.badLines).toBe(0);
+
+    const pageRes = await createApp(edgeConfig).request('/digest/2026-11-01');
+    expect(pageRes.status).toBe(200);
+    const html = await pageRes.text();
+    expect(html).toContain('nothing ran');
+  });
+
+  it('tolerates a malformed line, counting it without throwing', async () => {
+    const lines = [
+      '{"at":"2026-11-01T10:00:00+01:00","job":"lane/sync","status":"ok","owner":"rook"}',
+      'not valid json at all',
+      '{"at":"2026-11-01T11:00:00+01:00","job":"lane/sync","status":"ok","owner":"rook"}',
+    ];
+    writeFileSync(join(runsDir, '2026-11-02.jsonl'), lines.join('\n'));
+    const edgeConfig = { ...config, runsDir };
+
+    const jsonRes = await createApp(edgeConfig).request('/api/digest/2026-11-02');
+    expect(jsonRes.status).toBe(200);
+    const body = await jsonRes.json();
+    expect(body.badLines).toBe(1);
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0].job).toBe('lane/sync');
+    expect(body.rows[0].runs).toBe(2);
+
+    const pageRes = await createApp(edgeConfig).request('/digest/2026-11-02');
+    expect(pageRes.status).toBe(200);
+    const html = await pageRes.text();
+    expect(html).toContain('lane/sync');
   });
 });
